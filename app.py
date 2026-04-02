@@ -8,6 +8,8 @@ from typing import Any, Dict
 import streamlit as st
 
 from services.openai_client import OpenAIClientError, generate_gcode
+from utils.gcode_parser import parse_gcode_toolpath
+from utils.plotter import build_toolpath_figure
 from utils.validators import analyze_gcode_safety, validate_required_fields
 
 
@@ -100,7 +102,47 @@ if st.button("Generate G-code", type="primary", use_container_width=True):
             except OpenAIClientError as exc:
                 st.error(str(exc))
             else:
-                safety_issues = analyze_gcode_safety(result.get("gcode", ""), settings=settings)
+                if not isinstance(result, dict):
+                    st.error("Unexpected model response format. Please try again.")
+                    st.stop()
+
+                gcode_text = result.get("gcode")
+                if not isinstance(gcode_text, str) or not gcode_text.strip():
+                    st.error("Model response did not include valid G-code output.")
+                    st.stop()
+
+                safety_issues = analyze_gcode_safety(gcode_text, settings=settings)
+
+                st.subheader("Toolpath Visualization")
+                preview_warnings: list[str] = []
+                try:
+                    parsed = parse_gcode_toolpath(gcode_text)
+                    preview_warnings = list(parsed.warnings)
+
+                    if preview_warnings:
+                        st.warning(
+                            "Preview could not fully parse all G-code commands, showing partial path."
+                        )
+
+                    if parsed.segments:
+                        fig = build_toolpath_figure(
+                            segments=parsed.segments,
+                            bed_x=float(settings["bed_size_x"]),
+                            bed_y=float(settings["bed_size_y"]),
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No preview available for this output.")
+                except Exception:
+                    preview_warnings.append(
+                        "Preview could not fully parse all G-code commands, showing partial path."
+                    )
+                    st.warning("Preview could not fully parse all G-code commands, showing partial path.")
+                    st.info("No preview available for this output.")
+
+                st.caption(
+                    "Preview is approximate and should not replace manual review or slicer validation."
+                )
 
                 st.subheader("Summary")
                 st.write(result.get("summary", "No summary returned."))
@@ -116,6 +158,11 @@ if st.button("Generate G-code", type="primary", use_container_width=True):
                 with st.expander("Warnings", expanded=True):
                     model_warnings = result.get("warnings", [])
                     combined_warnings = list(model_warnings) + safety_issues
+                    if preview_warnings:
+                        combined_warnings.append(
+                            "Preview could not fully parse all G-code commands, showing partial path."
+                        )
+
                     if combined_warnings:
                         for item in combined_warnings:
                             st.markdown(f"- {item}")
@@ -123,7 +170,6 @@ if st.button("Generate G-code", type="primary", use_container_width=True):
                         st.write("No warnings reported.")
 
                 st.subheader("Generated G-code")
-                gcode_text = result.get("gcode", "")
                 st.code(gcode_text, language="gcode")
 
                 st.download_button(
